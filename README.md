@@ -44,22 +44,29 @@ maps to.
 
 #### Docker
 
-Build the image:
+- **Prebuilt image** (recommended starting point):
 
-```bash
-docker build -t dns-tun-lb .
-```
+  ```bash
+  docker run --rm \
+    -p 53:53/udp \
+    --cap-add=NET_BIND_SERVICE \
+    -v $(pwd)/lb.yaml:/etc/dns-tun-lb.yaml:ro \
+    --name dns-tun-lb \
+    ghcr.io/aleskxyz/dns-tun-lb:latest
+  ```
 
-Run binding UDP/53 on the host:
+- **Build locally**:
 
-```bash
-docker run --rm \
-  -p 53:53/udp \
-  --cap-add=NET_BIND_SERVICE \
-  -v $(pwd)/lb.yaml:/etc/dns-tun-lb.yaml:ro \
-  --name dns-tun-lb \
-  dns-tun-lb
-```
+  ```bash
+  docker build -t dns-tun-lb .
+
+  docker run --rm \
+    -p 53:53/udp \
+    --cap-add=NET_BIND_SERVICE \
+    -v $(pwd)/lb.yaml:/etc/dns-tun-lb.yaml:ro \
+    --name dns-tun-lb \
+    dns-tun-lb
+  ```
 
 ---
 
