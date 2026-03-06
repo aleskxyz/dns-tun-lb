@@ -11,6 +11,7 @@ import (
 	"github.com/miekg/dns"
 )
 
+// backendPool is a named set of backends for one domain suffix (stored normalized: lowercase, trimmed).
 type backendPool struct {
 	name         string
 	domainSuffix string
@@ -49,14 +50,25 @@ func newServer(cfg *Config) (*server, error) {
 	}
 
 	var dnsttPools []backendPool
+	seenSuffix := make(map[string]bool)
 	for _, p := range cfg.Protocols.Dnstt.Pools {
-		if p.DomainSuffix == "" || len(p.Backends) == 0 {
-			continue
+		if strings.TrimSpace(p.DomainSuffix) == "" {
+			conn.Close()
+			return nil, fmt.Errorf("dnstt pool %q has empty domain_suffix", p.Name)
 		}
+		if len(p.Backends) == 0 {
+			continue // skip pools with no backends
+		}
+		suffixKey := strings.ToLower(strings.TrimSpace(p.DomainSuffix))
+		if seenSuffix[suffixKey] {
+			conn.Close()
+			return nil, fmt.Errorf("duplicate dnstt domain_suffix %q (pool %q)", p.DomainSuffix, p.Name)
+		}
+		seenSuffix[suffixKey] = true
 		ring := newHashRing(p.Backends, 0)
 		dnsttPools = append(dnsttPools, backendPool{
 			name:         p.Name,
-			domainSuffix: p.DomainSuffix,
+			domainSuffix: suffixKey,
 			backends:     p.Backends,
 			ring:         ring,
 		})
@@ -87,6 +99,22 @@ func (s *server) serve() error {
 	}
 }
 
+// longestMatchingPool returns the pool whose domain suffix matches qname and has the longest
+// suffix length (most specific). Returns nil if no pool matches.
+func longestMatchingPool(qname string, pools []backendPool) *backendPool {
+	var best *backendPool
+	for i := range pools {
+		p := &pools[i]
+		if !MatchDomainSuffix(qname, p.domainSuffix) {
+			continue
+		}
+		if best == nil || len(p.domainSuffix) > len(best.domainSuffix) {
+			best = p
+		}
+	}
+	return best
+}
+
 func (s *server) handlePacket(packet []byte, src net.Addr) {
 	var msg dns.Msg
 	if err := msg.Unpack(packet); err != nil {
@@ -96,42 +124,30 @@ func (s *server) handlePacket(packet []byte, src net.Addr) {
 		return
 	}
 
-	// Track unsupported QTYPEs under configured dnstt domains.
+	// Route by configured domain suffix only (longest match). All QTYPEs go to the pool when the name matches.
 	if len(msg.Question) == 1 {
 		q := msg.Question[0]
-		lowerName := strings.ToLower(strings.TrimSuffix(q.Name, "."))
-		for _, pool := range s.dnsttPools {
-			suffix := strings.ToLower(pool.domainSuffix)
-			if strings.HasSuffix(lowerName, "."+suffix) && q.Qtype != dns.TypeTXT {
+		pool := longestMatchingPool(q.Name, s.dnsttPools)
+		if pool != nil {
+			if q.Qtype != dns.TypeTXT {
 				unsupportedQueriesTotal.WithLabelValues(fmt.Sprintf("%d", q.Qtype)).Inc()
-				break
 			}
-		}
-	}
-
-	// dnstt handling
-	for _, pool := range s.dnsttPools {
-		if !classifyDNSTT(&msg, pool.domainSuffix) {
-			continue
-		}
-		sid, ok := extractDNSTTSessionID(&msg, pool.domainSuffix)
-		if !ok {
-			parseErrorsTotal.WithLabelValues("dnstt_session_id").Inc()
-			dnsRequestsTotal.WithLabelValues("other").Inc()
-			s.forwardOrDrop(packet, src)
+			sid, ok := extractDNSTTSessionID(&msg, pool.domainSuffix)
+			if !ok {
+				sid = []byte(strings.ToLower(strings.TrimSuffix(q.Name, "."))) // same QNAME → same backend
+			}
+			backend := pool.ring.choose("dnstt", pool.domainSuffix, sid)
+			if s.sessionTracker != nil {
+				s.sessionTracker.observeSession("dnstt", pool.name, pool.domainSuffix, backend, sid)
+			}
+			dnsRequestsTotal.WithLabelValues("dnstt").Inc()
+			dnsRoutedRequestsTotal.WithLabelValues("dnstt", pool.name).Inc()
+			labels := labelsForBackend("dnstt", pool.name, pool.domainSuffix, backend)
+			backendRequestsTotal.With(labels).Inc()
+			logDebugf("dnstt session %x -> backend %s (%s)", sid, backend.ID, backend.Address)
+			s.forwardToBackend(packet, src, "dnstt", pool.name, pool.domainSuffix, backend)
 			return
 		}
-		backend := pool.ring.choose("dnstt", pool.domainSuffix, sid)
-		if s.sessionTracker != nil {
-			s.sessionTracker.observeSession("dnstt", pool.name, pool.domainSuffix, backend, sid)
-		}
-		dnsRequestsTotal.WithLabelValues("dnstt").Inc()
-		dnsRoutedRequestsTotal.WithLabelValues("dnstt", pool.name).Inc()
-		labels := labelsForBackend("dnstt", pool.name, pool.domainSuffix, backend)
-		backendRequestsTotal.With(labels).Inc()
-		logDebugf("dnstt session %x -> backend %s (%s)", sid, backend.ID, backend.Address)
-		s.forwardToBackend(packet, src, "dnstt", pool.name, pool.domainSuffix, backend)
-		return
 	}
 
 	dnsRequestsTotal.WithLabelValues("other").Inc()
@@ -143,7 +159,7 @@ func (s *server) forwardOrDrop(packet []byte, src net.Addr) {
 		dnsDroppedRequestsTotal.WithLabelValues("no_forwarder").Inc()
 		return
 	}
-	// Simple stateless forward: send to resolver, copy response back.
+	// Forward to default resolver and send response back to client.
 	resolverConn, err := net.DialUDP("udp", nil, s.forwardAddr)
 	if err != nil {
 		logErrorf("forward dial: %v", err)

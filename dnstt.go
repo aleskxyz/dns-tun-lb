@@ -7,43 +7,24 @@ import (
 	"github.com/miekg/dns"
 )
 
-// classifyDNSTT reports whether msg looks like a dnstt tunnel query for the given suffix.
-func classifyDNSTT(msg *dns.Msg, suffix string) bool {
-	if len(msg.Question) != 1 {
+// MatchDomainSuffix reports whether qname matches the given domain suffix.
+// It matches: exact (e.g. web.test.com) or any subdomain depth (e.g. sub.web.test.com, a.b.web.test.com).
+// It does not match: parent domain (e.g. test.com when suffix is web.test.com).
+// qname may have a trailing dot. Matching is case-insensitive.
+func MatchDomainSuffix(qname, suffix string) bool {
+	name := strings.ToLower(strings.TrimSuffix(qname, "."))
+	suffix = strings.ToLower(suffix)
+	if suffix == "" {
 		return false
 	}
-	q := msg.Question[0]
-	if q.Qtype != dns.TypeTXT || q.Qclass != dns.ClassINET {
-		return false
+	if name == suffix {
+		return true
 	}
-	if !strings.HasSuffix(strings.ToLower(q.Name), "."+strings.ToLower(suffix)+".") &&
-		!strings.EqualFold(strings.TrimSuffix(q.Name, "."), suffix) {
-		return false
-	}
-
-	var hasOpt bool
-	for _, extra := range msg.Extra {
-		if _, ok := extra.(*dns.OPT); ok {
-			hasOpt = true
-			// Be tolerant of resolvers rewriting UDPSize; only require EDNS presence.
-			// Optionally, we could check opt.Version() == 0 here, but it's not necessary
-			// for protocol correctness.
-		}
-	}
-	if !hasOpt {
-		return false
-	}
-
-	// Strong fingerprint: QNAME prefix must decode as a valid dnstt payload
-	// with at least an 8-byte ClientID.
-	if _, ok := extractDNSTTSessionID(msg, suffix); !ok {
-		return false
-	}
-	return true
+	return strings.HasSuffix(name, "."+suffix)
 }
 
-// extractDNSTTSessionID extracts the 8-byte ClientID used as session id.
-// It assumes msg is already classified as dnstt and suffix matches.
+// extractDNSTTSessionID returns the 8-byte ClientID from the QNAME prefix for consistent hashing.
+// Returns (nil, false) if the prefix is empty, not valid base32, or decodes to fewer than 8 bytes.
 func extractDNSTTSessionID(msg *dns.Msg, suffix string) ([]byte, bool) {
 	if len(msg.Question) == 0 {
 		return nil, false

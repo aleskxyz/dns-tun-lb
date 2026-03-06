@@ -65,14 +65,14 @@ var (
 	parseErrorsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dns_lb_parse_errors_total",
-			Help: "Total DNS parsing/classification errors, by stage.",
+			Help: "Total DNS unpack or parse errors, by stage.",
 		},
 		[]string{"stage"},
 	)
 	unsupportedQueriesTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dns_lb_unsupported_queries_total",
-			Help: "Total queries under tunnel domains with unsupported QTYPEs.",
+			Help: "Total non-TXT queries routed to tunnel pools (by QTYPE); requests still sent to backend.",
 		},
 		[]string{"qtype"},
 	)
