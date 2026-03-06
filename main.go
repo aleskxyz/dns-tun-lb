@@ -207,7 +207,7 @@ func (s *server) forwardOrDrop(packet []byte, src net.Addr) {
 
 	deadline := time.Now().Add(s.cfg.parsedReadTimeout)
 	resolverConn.SetWriteDeadline(deadline)
-    resolverConn.SetReadDeadline(deadline)
+	resolverConn.SetReadDeadline(deadline)
 
 	if _, err := resolverConn.Write(packet); err != nil {
 		logErrorf("forward write: %v", err)
@@ -247,7 +247,7 @@ func (s *server) forwardToBackend(packet []byte, src net.Addr, protocol, pool, d
 
 	deadline := time.Now().Add(s.cfg.parsedReadTimeout)
 	conn.SetWriteDeadline(deadline)
-    conn.SetReadDeadline(deadline)
+	conn.SetReadDeadline(deadline)
 
 	if _, err := conn.Write(packet); err != nil {
 		logErrorf("write backend: %v", err)
