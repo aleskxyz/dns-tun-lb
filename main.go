@@ -157,6 +157,9 @@ func (s *server) handlePacket(packet []byte, src net.Addr) {
 		if pool != nil {
 			if q.Qtype != dns.TypeTXT {
 				unsupportedQueriesTotal.WithLabelValues(fmt.Sprintf("%d", q.Qtype)).Inc()
+				rejectedRequestsTotal.WithLabelValues("non_txt").Inc()
+				s.forwardOrDrop(packet, src)
+				return
 			}
 			var sid []byte
 			var ok bool
@@ -169,7 +172,9 @@ func (s *server) handlePacket(packet []byte, src net.Addr) {
 				ok = false
 			}
 			if !ok {
-				sid = []byte(strings.ToLower(strings.TrimSuffix(q.Name, "."))) // fallback: same QNAME → same backend
+				rejectedRequestsTotal.WithLabelValues("no_session_id").Inc()
+				s.forwardOrDrop(packet, src)
+				return
 			}
 			backend := pool.ring.choose(pool.protocol, pool.domainSuffix, sid)
 			if s.sessionTracker != nil {

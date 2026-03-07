@@ -72,9 +72,17 @@ var (
 	unsupportedQueriesTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dns_lb_unsupported_queries_total",
-			Help: "Total non-TXT queries routed to tunnel pools (by QTYPE); requests still sent to backend.",
+			Help: "Total non-TXT queries that matched a tunnel pool (by QTYPE); not forwarded to pool.",
 		},
 		[]string{"qtype"},
+	)
+	// Rejected: matched a pool but not forwarded to any backend (non-TXT or no session ID).
+	rejectedRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dns_lb_rejected_requests_total",
+			Help: "Total requests that matched a tunnel pool but were rejected (non-TXT or no session ID), by reason.",
+		},
+		[]string{"reason"},
 	)
 
 	backendBytesSent = prometheus.NewCounterVec(
@@ -147,6 +155,7 @@ func init() {
 		frontendPacketsOut,
 		parseErrorsTotal,
 		unsupportedQueriesTotal,
+		rejectedRequestsTotal,
 
 		backendBytesSent,
 		backendBytesReceived,
