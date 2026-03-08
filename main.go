@@ -11,8 +11,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// backendPool is a named set of backends for one domain suffix (stored normalized: lowercase, trimmed).
-// protocol is "dnstt" or "slipstream".
+// backendPool is a named set of backends for one domain suffix.
 type backendPool struct {
 	protocol     string
 	name         string
@@ -22,11 +21,11 @@ type backendPool struct {
 }
 
 type server struct {
-	cfg            *Config
-	conn           net.PacketConn
-	pools          []backendPool
-	forwardAddr    *net.UDPAddr
-	sessionTracker *sessionTracker
+	cfg             *Config
+	conn            net.PacketConn
+	pools           []backendPool
+	forwardAddr     *net.UDPAddr
+	sessionTracker  *sessionTracker
 }
 
 func newServer(cfg *Config) (*server, error) {
@@ -52,14 +51,14 @@ func newServer(cfg *Config) (*server, error) {
 	}
 
 	var pools []backendPool
-	seenSuffix := make(map[string]string) // normalized suffix -> "protocol pool Name" for duplicate error
+	seenSuffix := make(map[string]string)
 	for _, p := range cfg.Protocols.Dnstt.Pools {
 		if strings.TrimSpace(p.DomainSuffix) == "" {
 			conn.Close()
 			return nil, fmt.Errorf("dnstt pool %q has empty domain_suffix", p.Name)
 		}
 		if len(p.Backends) == 0 {
-			continue // skip pools with no backends
+			continue
 		}
 		suffixKey := strings.ToLower(strings.TrimSpace(p.DomainSuffix))
 		if prev := seenSuffix[suffixKey]; prev != "" {
@@ -82,7 +81,19 @@ func newServer(cfg *Config) (*server, error) {
 			return nil, fmt.Errorf("slipstream pool %q has empty domain_suffix", p.Name)
 		}
 		if len(p.Backends) == 0 {
-			continue // skip pools with no backends
+			continue
+		}
+		seenLbID := make(map[uint8]string)
+		for _, b := range p.Backends {
+			if b.LbID == nil {
+				conn.Close()
+				return nil, fmt.Errorf("slipstream pool %q backend %q missing required lb_id", p.Name, b.ID)
+			}
+			if prev := seenLbID[*b.LbID]; prev != "" {
+				conn.Close()
+				return nil, fmt.Errorf("slipstream pool %q duplicate lb_id %d (backends %q and %q)", p.Name, *b.LbID, prev, b.ID)
+			}
+			seenLbID[*b.LbID] = b.ID
 		}
 		suffixKey := strings.ToLower(strings.TrimSpace(p.DomainSuffix))
 		if prev := seenSuffix[suffixKey]; prev != "" {
@@ -101,11 +112,11 @@ func newServer(cfg *Config) (*server, error) {
 	}
 
 	return &server{
-		cfg:            cfg,
-		conn:           conn,
-		pools:          pools,
-		forwardAddr:    forwardAddr,
-		sessionTracker: newSessionTracker(10 * time.Minute),
+		cfg:             cfg,
+		conn:            conn,
+		pools:           pools,
+		forwardAddr:     forwardAddr,
+		sessionTracker:  newSessionTracker(10 * time.Minute),
 	}, nil
 }
 
@@ -125,8 +136,7 @@ func (s *server) serve() error {
 	}
 }
 
-// longestMatchingPool returns the pool whose domain suffix matches qname and has the longest
-// suffix length. Returns nil if no pool matches. Tie-break: first in list order (dnstt then slipstream).
+// longestMatchingPool returns the pool with the longest matching domain suffix, or nil.
 func longestMatchingPool(qname string, pools []backendPool) *backendPool {
 	var best *backendPool
 	for i := range pools {
@@ -176,7 +186,22 @@ func (s *server) handlePacket(packet []byte, src net.Addr) {
 				s.forwardOrDrop(packet, src)
 				return
 			}
-			backend := pool.ring.choose(pool.protocol, pool.domainSuffix, sid)
+			var backend BackendConfig
+			if pool.protocol == "slipstream" {
+				serverID, decodeOK := decodeSlipstreamQUICLBServerID(&msg, pool.domainSuffix)
+				if decodeOK {
+					for i := range pool.backends {
+						b := &pool.backends[i]
+						if *b.LbID == serverID {
+							backend = *b
+							break
+						}
+					}
+				}
+			}
+			if backend.ID == "" && backend.Address == "" {
+				backend = pool.ring.choose(pool.protocol, pool.domainSuffix, sid)
+			}
 			if s.sessionTracker != nil {
 				s.sessionTracker.observeSession(pool.protocol, pool.name, pool.domainSuffix, backend, sid)
 			}

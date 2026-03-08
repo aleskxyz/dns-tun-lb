@@ -17,7 +17,7 @@ type hashRing struct {
 	nodes []hashRingNode
 }
 
-// newHashRing builds a consistent hash ring. replicas <= 0 defaults to 64.
+// newHashRing builds a consistent hash ring. replicas <= 0 defaults to 64. Backends sorted by ID for deterministic ring across instances.
 func newHashRing(backends []BackendConfig, replicas int) *hashRing {
 	if len(backends) == 0 {
 		return &hashRing{}
@@ -25,9 +25,12 @@ func newHashRing(backends []BackendConfig, replicas int) *hashRing {
 	if replicas <= 0 {
 		replicas = 64
 	}
+	sorted := make([]BackendConfig, len(backends))
+	copy(sorted, backends)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 
-	nodes := make([]hashRingNode, 0, len(backends)*replicas)
-	for _, b := range backends {
+	nodes := make([]hashRingNode, 0, len(sorted)*replicas)
+	for _, b := range sorted {
 		for i := 0; i < replicas; i++ {
 			h := fnv.New64a()
 			h.Write([]byte(b.ID))
@@ -47,7 +50,7 @@ func newHashRing(backends []BackendConfig, replicas int) *hashRing {
 	return &hashRing{nodes: nodes}
 }
 
-// choose returns the backend for the given protocol, domain suffix, and session ID (consistent hash).
+// choose returns the backend for the given protocol, domain suffix, and session ID.
 func (r *hashRing) choose(protocol, domainSuffix string, sessionID []byte) BackendConfig {
 	if len(r.nodes) == 0 {
 		return BackendConfig{}

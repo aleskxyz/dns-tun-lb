@@ -31,8 +31,10 @@ protocols:
         backends:
           - id: "slipstream-1"
             address: "10.0.0.21:5300"
+            lb_id: 0
           - id: "slipstream-2"
             address: "10.0.0.22:5300"
+            lb_id: 1
 
 logging:
   level: "info"              # "error" | "info" | "debug"

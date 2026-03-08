@@ -7,10 +7,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// MatchDomainSuffix reports whether qname matches the given domain suffix.
-// It matches: exact (e.g. web.test.com) or any subdomain depth (e.g. sub.web.test.com, a.b.web.test.com).
-// It does not match: parent domain (e.g. test.com when suffix is web.test.com).
-// qname may have a trailing dot. Matching is case-insensitive.
+// MatchDomainSuffix reports whether qname equals or is a subdomain of suffix. Case-insensitive; qname may have a trailing dot.
 func MatchDomainSuffix(qname, suffix string) bool {
 	name := strings.ToLower(strings.TrimSuffix(qname, "."))
 	suffix = strings.ToLower(suffix)
@@ -23,8 +20,7 @@ func MatchDomainSuffix(qname, suffix string) bool {
 	return strings.HasSuffix(name, "."+suffix)
 }
 
-// decodeQnamePrefixPayload returns the base32-decoded QNAME prefix (the part before the domain suffix).
-// Label dots are stripped before decoding (DNSTT/slipstream). Returns (nil, false) on empty prefix or decode error.
+// decodeQnamePrefixPayload returns the base32-decoded QNAME prefix before the domain suffix, or (nil, false) on error.
 func decodeQnamePrefixPayload(msg *dns.Msg, suffix string) ([]byte, bool) {
 	if len(msg.Question) == 0 {
 		return nil, false

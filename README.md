@@ -12,10 +12,13 @@ The LB:
   is sent to that pool’s backends. All QTYPEs (TXT, A, CNAME, etc.) are sent
   to the pool when the name matches.
 - Extracts a session identifier per protocol (dnstt: 8-byte ClientID from the
-  QNAME prefix; slipstream: 8-byte connection ID from the QUIC payload) for
-  consistent hashing. If extraction fails, the full QNAME is used so the same
-  query still hits the same backend.
-- Uses a per-pool consistent hash ring for per-session stickiness.
+  QNAME prefix; slipstream: 8-byte connection ID from the QUIC payload). If
+  extraction fails, the request is not routed to the pool (rejected/forwarded).
+- **Slipstream**: when the packet carries a QUIC-LB connection ID, routes by
+  `server_id` to the backend with matching `lb_id`; otherwise uses the
+  per-pool consistent hash ring. **Dnstt**: always uses the hash ring.
+- Uses a per-pool consistent hash ring for session stickiness (and slipstream
+  fallback when QUIC-LB is not present).
 - For queries that match no pool, forwards to a recursive resolver or drops,
   depending on configuration.
 
@@ -106,6 +109,10 @@ protocols:
         backends:
           - id: "slipstream-1"
             address: "10.0.0.21:5300"
+            lb_id: 0
+          - id: "slipstream-2"
+            address: "10.0.0.22:5300"
+            lb_id: 1
 
 logging:
   level: "info"              # "error" | "info" | "debug"
@@ -156,8 +163,9 @@ t.example.com.      IN  NS    tns5.example.com.
     across all pools (dnstt and slipstream). Empty suffix is rejected.
   - `backends[]`: UDP endpoints (e.g. `dnstt-server` or `slipstream-server`).
     Each backend has `id` (for metrics) and `address` in `host:port` form;
-    `host` may be an IP or a domain name (resolved at dial time). Pools with
-    no backends are skipped.
+    `host` may be an IP or a domain name (resolved at dial time). **Slipstream
+    only**: each backend must have `lb_id` (0–255), unique per pool; used for
+    QUIC-LB routing. Pools with no backends are skipped.
 - **`logging.level`**:
   - `"error"`: only errors.
   - `"info"`: high-level lifecycle and summary (default).
@@ -175,14 +183,24 @@ For each incoming DNS query (with exactly one question):
   according to `default_dns_behavior`.
 - For the matched pool, a **session ID** is derived:
   - **dnstt**: first 8 bytes of the base32-decoded QNAME prefix (ClientID). If
-    the prefix is missing, invalid base32, or decodes to fewer than 8 bytes,
-    the full normalized QNAME is used instead.
-  - **slipstream**: 8-byte connection ID from the QUIC payload in the QNAME
-    (long header: SCID; short header: first 8 bytes of DCID). If the payload
-    is too short or invalid, the full normalized QNAME is used instead.
-- The backend is chosen with a per-pool consistent hash over
-  `(protocol, domain_suffix, session_id)`. All packets for the same session
-  go to the same backend while pool membership is unchanged.
+    missing or invalid, the request is not routed to the pool.
+  - **slipstream**: 8-byte connection ID from the QUIC payload (long header:
+    DCID or SCID if DCID empty; short header: first 8 bytes of DCID). If too
+    short or invalid, the request is not routed to the pool.
+- **Backend selection**: **Slipstream**: if the packet has a QUIC-LB CID, route
+  to the backend whose `lb_id` matches the decoded `server_id`; otherwise use
+  the hash ring. **Dnstt**: always use the hash ring. Hash is over
+  `(protocol, domain_suffix, session_id)`. Same session → same backend.
+
+**Multiple LB instances (e.g. Slipstream+SSH stickiness)**  
+When you run more than one LB replica (e.g. for HA), the same session must
+always map to the same backend no matter which instance receives the packet.
+Use the **same pool configuration** on every instance: same backends with the
+same `id` and `address`. The ring is built from backends sorted by `id`, so
+identical configs yield the same routing. In clients (e.g. SlipNet), using a
+single resolver (one LB IP) for the tunnel avoids spreading packets across
+instances; if you use multiple resolvers, point them at LBs that share the
+same config.
 
 ---
 
@@ -204,7 +222,7 @@ serves Prometheus metrics at `http://<addr>/metrics`.
 | `dns_lb_frontend_bytes_in_total` | counter | — | Bytes received on the frontend. |
 | `dns_lb_frontend_bytes_out_total` | counter | — | Bytes sent to clients. |
 | `dns_lb_parse_errors_total` | counter | `stage` | DNS unpack or parse errors (e.g. `dns_unpack`). |
-| `dns_lb_unsupported_queries_total` | counter | `qtype` | Non-TXT queries routed to tunnel pools (counted by QTYPE; still sent to backend). |
+| `dns_lb_unsupported_queries_total` | counter | `qtype` | Non-TXT queries that matched a pool (rejected, not sent to backend). |
 
 **Backend (per pool/backend)**
 

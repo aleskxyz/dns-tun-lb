@@ -4,8 +4,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// extractDNSTTSessionID returns the 8-byte ClientID from the QNAME prefix for consistent hashing.
-// Returns (nil, false) if the prefix is empty, not valid base32, or decodes to fewer than 8 bytes.
+// extractDNSTTSessionID returns the first 8 bytes of the base32-decoded QNAME prefix, or (nil, false) if invalid or too short.
 func extractDNSTTSessionID(msg *dns.Msg, suffix string) ([]byte, bool) {
 	buf, ok := decodeQnamePrefixPayload(msg, suffix)
 	if !ok || len(buf) < 8 {

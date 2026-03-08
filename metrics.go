@@ -199,8 +199,7 @@ func newSessionTracker(ttl time.Duration) *sessionTracker {
 	}
 }
 
-// observeSession records that a session is active on a backend. If it's a new
-// session key, increments total and active gauges.
+// observeSession records a session as active on a backend; increments gauges for new keys.
 func (t *sessionTracker) observeSession(protocol, pool, domain string, backend BackendConfig, sid []byte) {
 	if len(sid) == 0 {
 		return
@@ -221,8 +220,7 @@ func (t *sessionTracker) observeSession(protocol, pool, domain string, backend B
 	}
 }
 
-// reapExpired decrements active sessions for entries that have been idle past
-// the TTL.
+// reapExpired removes entries idle past the TTL and decrements active gauges.
 func (t *sessionTracker) reapExpired() {
 	now := time.Now()
 
@@ -244,7 +242,7 @@ func (t *sessionTracker) reapExpired() {
 	}
 }
 
-// startSessionJanitor runs a background goroutine to periodically reap expired sessions.
+// startSessionJanitor starts a goroutine that periodically reaps expired sessions.
 func (t *sessionTracker) startSessionJanitor() {
 	if t == nil {
 		return
@@ -258,16 +256,15 @@ func (t *sessionTracker) startSessionJanitor() {
 	}()
 }
 
-// sessionKeySep is used to join key parts; must not appear in protocol/pool/domain/backend_id.
+// sessionKeySep joins key parts; must not appear in label values.
 const sessionKeySep = "\x00"
 
 // sessionKey encodes protocol/pool/domain/backend/session into a string key.
 func sessionKey(protocol, pool, domain string, backend BackendConfig, sid []byte) string {
-	// Sep must not appear in labels so parseSessionKey is unambiguous.
 	return protocol + sessionKeySep + pool + sessionKeySep + domain + sessionKeySep + backend.ID + sessionKeySep + string(sid)
 }
 
-// parseSessionKey decodes a key created by sessionKey (ignoring session id).
+// parseSessionKey decodes a key from sessionKey (returns first four segments).
 func parseSessionKey(key string) (protocol, pool, domain, backendID string) {
 	parts := strings.SplitN(key, sessionKeySep, 5)
 	if len(parts) < 4 {
