@@ -168,7 +168,26 @@ func (s *server) handlePacket(packet []byte, src net.Addr) {
 			if q.Qtype != dns.TypeTXT {
 				unsupportedQueriesTotal.WithLabelValues(fmt.Sprintf("%d", q.Qtype)).Inc()
 				rejectedRequestsTotal.WithLabelValues("non_txt").Inc()
-				s.forwardOrDrop(packet, src)
+				// For names under a configured tunnel suffix, mimic dnstt/slipstream behavior:
+				// respond with NXDOMAIN (NAME_ERROR) for any non-TXT QTYPE, rather than forwarding.
+				resp := dns.Msg{}
+				resp.SetReply(&msg)
+				resp.Authoritative = true
+				resp.Rcode = dns.RcodeNameError
+				resp.Answer = nil
+				resp.Ns = nil
+				buf, err := resp.Pack()
+				if err != nil {
+					// If we fail to pack a response, fall back to forward/drop behavior.
+					s.forwardOrDrop(packet, src)
+					return
+				}
+				if _, err := s.conn.WriteTo(buf, src); err != nil {
+					logErrorf("write non-txt reply: %v", err)
+				} else {
+					frontendPacketsOut.Inc()
+					frontendBytesOut.Add(float64(len(buf)))
+				}
 				return
 			}
 			var sid []byte
