@@ -160,34 +160,25 @@ func (s *server) handlePacket(packet []byte, src net.Addr) {
 		return
 	}
 
-	// Route by configured domain suffix only (longest match). All QTYPEs go to the pool when the name matches.
+	// Route by configured domain suffix only (longest match).
 	if len(msg.Question) == 1 {
 		q := msg.Question[0]
 		pool := longestMatchingPool(q.Name, s.pools)
 		if pool != nil {
 			if q.Qtype != dns.TypeTXT {
 				unsupportedQueriesTotal.WithLabelValues(fmt.Sprintf("%d", q.Qtype)).Inc()
-				rejectedRequestsTotal.WithLabelValues("non_txt").Inc()
-				// For names under a configured tunnel suffix, mimic dnstt/slipstream behavior:
-				// respond with NXDOMAIN (NAME_ERROR) for any non-TXT QTYPE, rather than forwarding.
-				resp := dns.Msg{}
-				resp.SetReply(&msg)
-				resp.Authoritative = true
-				resp.Rcode = dns.RcodeNameError
-				resp.Answer = nil
-				resp.Ns = nil
-				buf, err := resp.Pack()
-				if err != nil {
-					// If we fail to pack a response, fall back to forward/drop behavior.
-					s.forwardOrDrop(packet, src)
-					return
+
+				// Route non-TXT queries using the hash ring without session affinity.
+				backend := pool.ring.choose(pool.protocol, pool.domainSuffix, nil)
+				if s.sessionTracker != nil {
+					s.sessionTracker.observeSession(pool.protocol, pool.name, pool.domainSuffix, backend, nil)
 				}
-				if _, err := s.conn.WriteTo(buf, src); err != nil {
-					logErrorf("write non-txt reply: %v", err)
-				} else {
-					frontendPacketsOut.Inc()
-					frontendBytesOut.Add(float64(len(buf)))
-				}
+				dnsRequestsTotal.WithLabelValues(pool.protocol).Inc()
+				dnsRoutedRequestsTotal.WithLabelValues(pool.protocol, pool.name).Inc()
+				labels := labelsForBackend(pool.protocol, pool.name, pool.domainSuffix, backend)
+				backendRequestsTotal.With(labels).Inc()
+				logDebugf("%s non-TXT qtype=%d name=%s -> backend %s (%s)", pool.protocol, q.Qtype, q.Name, backend.ID, backend.Address)
+				s.forwardToBackend(packet, src, pool.protocol, pool.name, pool.domainSuffix, backend)
 				return
 			}
 			var sid []byte
