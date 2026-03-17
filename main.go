@@ -111,6 +111,30 @@ func newServer(cfg *Config) (*server, error) {
 		})
 	}
 
+	for _, p := range cfg.Protocols.Noizdns.Pools {
+		if strings.TrimSpace(p.DomainSuffix) == "" {
+			conn.Close()
+			return nil, fmt.Errorf("noizdns pool %q has empty domain_suffix", p.Name)
+		}
+		if len(p.Backends) == 0 {
+			continue
+		}
+		suffixKey := strings.ToLower(strings.TrimSpace(p.DomainSuffix))
+		if prev := seenSuffix[suffixKey]; prev != "" {
+			conn.Close()
+			return nil, fmt.Errorf("duplicate domain_suffix %q: already used by %s (noizdns pool %q)", p.DomainSuffix, prev, p.Name)
+		}
+		seenSuffix[suffixKey] = "noizdns pool " + p.Name
+		ring := newHashRing(p.Backends, 0)
+		pools = append(pools, backendPool{
+			protocol:     "noizdns",
+			name:         p.Name,
+			domainSuffix: suffixKey,
+			backends:     p.Backends,
+			ring:         ring,
+		})
+	}
+
 	return &server{
 		cfg:             cfg,
 		conn:            conn,
@@ -168,6 +192,7 @@ func (s *server) handlePacket(packet []byte, src net.Addr) {
 			var sid []byte
 			var haveSession bool
 
+			// For non-TXT, we still route to backend but mark as unsupported.
 			if q.Qtype != dns.TypeTXT {
 				unsupportedQueriesTotal.WithLabelValues(fmt.Sprintf("%d", q.Qtype)).Inc()
 			} else {
@@ -176,6 +201,8 @@ func (s *server) handlePacket(packet []byte, src net.Addr) {
 					sid, haveSession = extractDNSTTSessionID(&msg, pool.domainSuffix)
 				case "slipstream":
 					sid, haveSession = extractSlipstreamSessionID(&msg, pool.domainSuffix)
+				case "noizdns":
+					sid, haveSession = extractNoizdnsSessionID(&msg, pool.domainSuffix)
 				default:
 					haveSession = false
 				}
@@ -185,6 +212,7 @@ func (s *server) handlePacket(packet []byte, src net.Addr) {
 			}
 
 			var backend BackendConfig
+			// For slipstream, prefer the QUIC-LB server ID if present.
 			if pool.protocol == "slipstream" && len(sid) > 0 {
 				serverID, decodeOK := decodeSlipstreamQUICLBServerID(&msg, pool.domainSuffix)
 				if decodeOK {
@@ -197,6 +225,7 @@ func (s *server) handlePacket(packet []byte, src net.Addr) {
 					}
 				}
 			}
+			// Fallback: choose backend via hash ring.
 			if backend.ID == "" && backend.Address == "" {
 				backend = pool.ring.choose(pool.protocol, pool.domainSuffix, sid)
 			}
@@ -204,6 +233,7 @@ func (s *server) handlePacket(packet []byte, src net.Addr) {
 			if s.sessionTracker != nil {
 				s.sessionTracker.observeSession(pool.protocol, pool.name, pool.domainSuffix, backend, sid)
 			}
+
 			dnsRequestsTotal.WithLabelValues(pool.protocol).Inc()
 			dnsRoutedRequestsTotal.WithLabelValues(pool.protocol, pool.name).Inc()
 			labels := labelsForBackend(pool.protocol, pool.name, pool.domainSuffix, backend)

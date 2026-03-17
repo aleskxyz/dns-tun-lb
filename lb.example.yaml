@@ -36,6 +36,14 @@ protocols:
             address: "10.0.0.22:5300"
             lb_id: 1
 
+  noizdns:
+    pools:
+      - name: "noizdns-main"
+        domain_suffix: "n.example.com"
+        backends:
+          - id: "noizdns-1"
+            address: "10.0.0.31:5300"
+
 logging:
   level: "info"              # "error" | "info" | "debug"
 

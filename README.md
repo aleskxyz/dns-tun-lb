@@ -1,7 +1,7 @@
 ## dns-tun-lb (DNS tunnel load balancer)
 
 `dns-tun-lb` is a small, stateless UDP load balancer for DNS tunneling
-protocols. It supports **dnstt** and **slipstream**.
+protocols. It supports **dnstt**, **slipstream**, and **noizdns**.
 
 The LB:
 
@@ -12,8 +12,10 @@ The LB:
   is sent to that pool’s backends. All QTYPEs (TXT, A, CNAME, etc.) are sent
   to the pool when the name matches.
 - Extracts a session identifier per protocol (dnstt: 8-byte ClientID from the
-  QNAME prefix; slipstream: 8-byte connection ID from the QUIC payload). If
-  extraction fails, the request is not routed to the pool (rejected/forwarded).
+  QNAME prefix; slipstream: 8-byte connection ID from the QUIC payload;
+  noizdns: first 8 bytes of the decoded payload). If session extraction fails
+  for any protocol, the request is still routed to the pool but is counted as
+  `no_session_id` in metrics.
 - **Slipstream**: when the packet carries a QUIC-LB connection ID, routes by
   `server_id` to the backend with matching `lb_id`; otherwise uses the
   per-pool consistent hash ring. **Dnstt**: always uses the hash ring.
@@ -34,7 +36,7 @@ different instances will make the same routing decision for a given packet.
 
 Prereqs:
 
-- Go 1.22+ (tested with Go 1.24).
+- Go 1.25+.
 
 Build and run from `dns-tunnel/dns-tunnel-lb`:
 
@@ -113,6 +115,13 @@ protocols:
           - id: "slipstream-2"
             address: "10.0.0.22:5300"
             lb_id: 1
+  noizdns:
+    pools:
+      - name: "noizdns-main"
+        domain_suffix: "n.example.com"
+        backends:
+          - id: "noizdns-1"
+            address: "10.0.0.31:5300"
 
 logging:
   level: "info"              # "error" | "info" | "debug"
@@ -156,12 +165,12 @@ t.example.com.      IN  NS    tns5.example.com.
   - If `mode: "forward"` is set, `forward_resolver` is required (e.g.
     `"9.9.9.9:53"` or `"resolver.example.com:53"`; host may be IP or domain);
     otherwise the LB will fail to start.
-- **`protocols.dnstt.pools[]`** and **`protocols.slipstream.pools[]`**:
+- **`protocols.dnstt.pools[]`**, **`protocols.slipstream.pools[]`**, and **`protocols.noizdns.pools[]`**:
   - `domain_suffix`: QNAME suffix for this pool (e.g. `t.example.com`). The LB
     uses **longest match**: if multiple pools match the query name, the one
     with the longest suffix wins. **Each `domain_suffix` must be unique**
     across all pools (dnstt and slipstream). Empty suffix is rejected.
-  - `backends[]`: UDP endpoints (e.g. `dnstt-server` or `slipstream-server`).
+  - `backends[]`: UDP endpoints (e.g. `dnstt-server`, `noizdns-server`, or `slipstream-server`).
     Each backend has `id` (for metrics) and `address` in `host:port` form;
     `host` may be an IP or a domain name (resolved at dial time). **Slipstream
     only**: each backend must have `lb_id` (0–255), unique per pool; used for
@@ -182,11 +191,13 @@ For each incoming DNS query (with exactly one question):
   longest suffix length. If none match, the packet is forwarded or dropped
   according to `default_dns_behavior`.
 - For the matched pool, a **session ID** is derived:
-  - **dnstt**: first 8 bytes of the base32-decoded QNAME prefix (ClientID). If
-    missing or invalid, the request is not routed to the pool.
+  - **dnstt**: first 8 bytes of the base32-decoded QNAME prefix (ClientID).
   - **slipstream**: 8-byte connection ID from the QUIC payload (long header:
-    DCID or SCID if DCID empty; short header: first 8 bytes of DCID). If too
-    short or invalid, the request is not routed to the pool.
+    DCID or SCID if DCID empty; short header: first 8 bytes of DCID).
+  - **noizdns**: first 8 bytes of the decoded payload extracted from the QNAME
+    (hex, base36, or base32 as described in `noizdns.go`).
+  - If session extraction fails for any protocol, the request is still routed to
+    the pool but is counted as `no_session_id` in metrics.
 - **Backend selection**: **Slipstream**: if the packet has a QUIC-LB CID, route
   to the backend whose `lb_id` matches the decoded `server_id`; otherwise use
   the hash ring. **Dnstt**: always use the hash ring. Hash is over
@@ -222,7 +233,7 @@ serves Prometheus metrics at `http://<addr>/metrics`.
 | `dns_lb_frontend_bytes_in_total` | counter | — | Bytes received on the frontend. |
 | `dns_lb_frontend_bytes_out_total` | counter | — | Bytes sent to clients. |
 | `dns_lb_parse_errors_total` | counter | `stage` | DNS unpack or parse errors (e.g. `dns_unpack`). |
-| `dns_lb_unsupported_queries_total` | counter | `qtype` | Non-TXT queries that matched a pool (rejected, not sent to backend). |
+| `dns_lb_unsupported_queries_total` | counter | `qtype` | Non-TXT queries that matched a pool (still routed to backend, but counted as unsupported). |
 
 **Backend (per pool/backend)**
 
@@ -247,21 +258,21 @@ graph LR
     C[Client] --> R1[Recursive resolver 1]
     C --> R2[Recursive resolver 2]
 
-    %% LB instances (one per host, each beside a dnstt/slipstream server)
+    %% LB instances (one per host, each beside a dnstt/slipstream/noizdns server)
     subgraph Host1
-        LB1["LB 1 (dns-tun-lb)"] --- S1[dnstt/slipstream server 1]
+        LB1["LB 1 (dns-tun-lb)"] --- S1[dnstt/slipstream/noizdns server 1]
     end
     subgraph Host2
-        LB2["LB 2 (dns-tun-lb)"] --- S2[dnstt/slipstream server 2]
+        LB2["LB 2 (dns-tun-lb)"] --- S2[dnstt/slipstream/noizdns server 2]
     end
     subgraph Host3
-        LB3["LB 3 (dns-tun-lb)"] --- S3[dnstt/slipstream server 3]
+        LB3["LB 3 (dns-tun-lb)"] --- S3[dnstt/slipstream/noizdns server 3]
     end
     subgraph Host4
-        LB4["LB 4 (dns-tun-lb)"] --- S4[dnstt/slipstream server 4]
+        LB4["LB 4 (dns-tun-lb)"] --- S4[dnstt/slipstream/noizdns server 4]
     end
     subgraph Host5
-        LB5["LB 5 (dns-tun-lb)"] --- S5[dnstt/slipstream server 5]
+        LB5["LB 5 (dns-tun-lb)"] --- S5[dnstt/slipstream/noizdns server 5]
     end
 
     %% Resolvers can hit any LB directly
@@ -277,7 +288,7 @@ graph LR
     R2 --> LB4
     R2 --> LB5
 
-    %% Full mesh between LBs and dnstt/slipstream server backends
+    %% Full mesh between LBs and dnstt/slipstream/noizdns server backends
     LB1 -->|"consistent hash on session ID"| S1
     LB1 --> S2
     LB1 --> S3
