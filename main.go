@@ -165,39 +165,27 @@ func (s *server) handlePacket(packet []byte, src net.Addr) {
 		q := msg.Question[0]
 		pool := longestMatchingPool(q.Name, s.pools)
 		if pool != nil {
+			var sid []byte
+			var haveSession bool
+
 			if q.Qtype != dns.TypeTXT {
 				unsupportedQueriesTotal.WithLabelValues(fmt.Sprintf("%d", q.Qtype)).Inc()
-
-				// Route non-TXT queries using the hash ring without session affinity.
-				backend := pool.ring.choose(pool.protocol, pool.domainSuffix, nil)
-				if s.sessionTracker != nil {
-					s.sessionTracker.observeSession(pool.protocol, pool.name, pool.domainSuffix, backend, nil)
+			} else {
+				switch pool.protocol {
+				case "dnstt":
+					sid, haveSession = extractDNSTTSessionID(&msg, pool.domainSuffix)
+				case "slipstream":
+					sid, haveSession = extractSlipstreamSessionID(&msg, pool.domainSuffix)
+				default:
+					haveSession = false
 				}
-				dnsRequestsTotal.WithLabelValues(pool.protocol).Inc()
-				dnsRoutedRequestsTotal.WithLabelValues(pool.protocol, pool.name).Inc()
-				labels := labelsForBackend(pool.protocol, pool.name, pool.domainSuffix, backend)
-				backendRequestsTotal.With(labels).Inc()
-				logDebugf("%s non-TXT qtype=%d name=%s -> backend %s (%s)", pool.protocol, q.Qtype, q.Name, backend.ID, backend.Address)
-				s.forwardToBackend(packet, src, pool.protocol, pool.name, pool.domainSuffix, backend)
-				return
+				if !haveSession {
+					rejectedRequestsTotal.WithLabelValues("no_session_id").Inc()
+				}
 			}
-			var sid []byte
-			var ok bool
-			switch pool.protocol {
-			case "dnstt":
-				sid, ok = extractDNSTTSessionID(&msg, pool.domainSuffix)
-			case "slipstream":
-				sid, ok = extractSlipstreamSessionID(&msg, pool.domainSuffix)
-			default:
-				ok = false
-			}
-			if !ok {
-				rejectedRequestsTotal.WithLabelValues("no_session_id").Inc()
-				s.forwardOrDrop(packet, src)
-				return
-			}
+
 			var backend BackendConfig
-			if pool.protocol == "slipstream" {
+			if pool.protocol == "slipstream" && len(sid) > 0 {
 				serverID, decodeOK := decodeSlipstreamQUICLBServerID(&msg, pool.domainSuffix)
 				if decodeOK {
 					for i := range pool.backends {
@@ -212,6 +200,7 @@ func (s *server) handlePacket(packet []byte, src net.Addr) {
 			if backend.ID == "" && backend.Address == "" {
 				backend = pool.ring.choose(pool.protocol, pool.domainSuffix, sid)
 			}
+
 			if s.sessionTracker != nil {
 				s.sessionTracker.observeSession(pool.protocol, pool.name, pool.domainSuffix, backend, sid)
 			}
@@ -219,7 +208,11 @@ func (s *server) handlePacket(packet []byte, src net.Addr) {
 			dnsRoutedRequestsTotal.WithLabelValues(pool.protocol, pool.name).Inc()
 			labels := labelsForBackend(pool.protocol, pool.name, pool.domainSuffix, backend)
 			backendRequestsTotal.With(labels).Inc()
-			logDebugf("%s session %x -> backend %s (%s)", pool.protocol, sid, backend.ID, backend.Address)
+			if q.Qtype == dns.TypeTXT && len(sid) > 0 {
+				logDebugf("%s session %x -> backend %s (%s)", pool.protocol, sid, backend.ID, backend.Address)
+			} else {
+				logDebugf("%s qtype=%d name=%s -> backend %s (%s)", pool.protocol, q.Qtype, q.Name, backend.ID, backend.Address)
+			}
 			s.forwardToBackend(packet, src, pool.protocol, pool.name, pool.domainSuffix, backend)
 			return
 		}
