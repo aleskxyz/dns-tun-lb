@@ -1,6 +1,6 @@
 ## Multi-stage build for dns-tun-lb
 
-FROM golang:1.24 AS builder
+FROM golang:1.25 AS builder
 
 WORKDIR /app
 

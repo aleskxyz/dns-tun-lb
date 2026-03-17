@@ -1,6 +1,6 @@
 module aleskxyz/dns-tun-lb
 
-go 1.22
+go 1.25
 
 require (
 	github.com/miekg/dns v1.1.62

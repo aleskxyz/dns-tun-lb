@@ -50,6 +50,7 @@ type SlipstreamProtocolConfig struct {
 type ProtocolsConfig struct {
 	Dnstt      DnsttProtocolConfig      `yaml:"dnstt"`
 	Slipstream SlipstreamProtocolConfig `yaml:"slipstream"`
+	Noizdns    DnsttProtocolConfig      `yaml:"noizdns"`
 }
 
 type LoggingConfig struct {
